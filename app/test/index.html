@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>PDF 高亮 Demo (毕设专用)</title>
+    <!-- 引入 PDF.js CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+    <script>
+        // 配置 Worker
+        pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    </script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #f4f4f9; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        h2 { color: #333; }
+
+        /* 模拟后端返回的数据展示区 */
+        .data-panel {
+            background: white; padding: 15px; border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1); width: 80%; max-width: 800px;
+            margin-bottom: 20px; border-left: 5px solid #007bff;
+        }
+        .data-panel h3 { margin-top: 0; font-size: 16px; color: #555; }
+        .data-panel pre { background: #f8f9fa; padding: 10px; border-radius: 4px; overflow-x: auto; font-size: 12px; color: #d63384; }
+
+        /* PDF 容器 */
+        #pdf-wrapper {
+            position: relative;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            margin-bottom: 40px;
+        }
+
+        /* 高亮框样式 */
+        .highlight-rect {
+            position: absolute;
+            background-color: yellow;
+            opacity: 0.4;
+            border: 1px solid rgba(255, 165, 0, 0.6);
+            pointer-events: none; /* 关键：让鼠标穿透，不影响选中文本 */
+            z-index: 10;
+            mix-blend-mode: multiply; /* 混合模式，让文字更清晰 */
+        }
+
+        .loading { color: #666; font-style: italic; }
+        .error { color: red; font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <h2>🎓 毕设 Demo：后端坐标 -> 前端高亮</h2>
+
+    <!-- 模拟后端返回的数据 -->
+    <div class="data-panel">
+        <h3>📡 模拟后端返回的 JSON 数据 (已写死)</h3>
+        <p style="font-size: 13px; color: #666;">
+            这里模拟了后端 PyMuPDF 计算出的坐标。实际项目中，这些数据来自 API 接口。<br>
+            <strong>注意：</strong>请确保同级目录下有名为 <code>your_file.pdf</code> 的文件，否则无法渲染。
+        </p>
+        <pre id="json-display"></pre>
+    </div>
+
+    <div id="status-msg" class="loading">正在加载 PDF...</div>
+
+    <!-- PDF 渲染区域 -->
+    <div id="pdf-wrapper"></div>
+
+    <script>
+        // ==========================================
+        // 1. 模拟后端返回的数据 (写死在这里)
+        // ==========================================
+        // 假设你的 PDF 第一页有 "第一条" 和 "奖学金"
+        // 这些坐标是基于标准 A4 纸 (595x842) 估算的示例坐标
+        // 如果你的 PDF 内容不同，高亮位置可能会偏，但逻辑是通用的！
+        const MOCK_BACKEND_RESPONSE = {
+            "status": "success",
+            "total_hits": 3,
+            "data": [
+                {
+                    "page": 1,
+                    "keyword": "第一条",
+                    "x0": 72, "y0": 650, "x1": 130, "y1": 665,
+                    "width": 58, "height": 15
+                },
+                {
+                    "page": 1,
+                    "keyword": "奖学金",
+                    "x0": 200, "y0": 600, "x1": 260, "y1": 615,
+                    "width": 60, "height": 15
+                },
+                {
+                    "page": 1,
+                    "keyword": "学生处",
+                    "x0": 150, "y0": 500, "x1": 210, "y1": 515,
+                    "width": 60, "height": 15
+                }
+            ]
+        };
+
+        // 将模拟数据显示在页面上
+        document.getElementById('json-display').textContent = JSON.stringify(MOCK_BACKEND_RESPONSE, null, 2);
+
+        // ==========================================
+        // 2. 前端核心逻辑
+        // ==========================================
+
+        const PDF_FILE_NAME = 'test.pdf'; // 👈 确保你的 PDF 叫这个名字
+        const SCALE = 1.5; // 缩放比例
+
+        async function init() {
+            const wrapper = document.getElementById('pdf-wrapper');
+            const statusMsg = document.getElementById('status-msg');
+
+            try {
+                // 加载 PDF
+                const loadingTask = pdfjsLib.getDocument(PDF_FILE_NAME);
+                const pdf = await loadingTask.promise;
+
+                statusMsg.textContent = `✅ PDF 加载成功！共 ${pdf.numPages} 页。正在渲染第 1 页并绘制高亮...`;
+                statusMsg.style.color = 'green';
+
+                // 为了演示，我们只渲染第 1 页 (如果有数据的话)
+                const pageNum = 1;
+                const page = await pdf.getPage(pageNum);
+
+                const viewport = page.getViewport({ scale: SCALE });
+
+                // 创建容器
+                wrapper.style.width = `${viewport.width}px`;
+                wrapper.style.height = `${viewport.height}px`;
+                wrapper.innerHTML = ''; // 清空
+
+                // 创建 Canvas
+                const canvas = document.createElement('canvas');
+                canvas.height = viewport.height;
+                canvas.width = viewport.width;
+                wrapper.appendChild(canvas);
+
+                // 渲染 PDF 内容到 Canvas
+                const renderContext = {
+                    canvasContext: canvas.getContext('2d'),
+                    viewport: viewport
+                };
+                await page.render(renderContext).promise;
+
+                // 🌟 绘制高亮框
+                const highlights = MOCK_BACKEND_RESPONSE.data.filter(h => h.page === pageNum);
+
+                if (highlights.length > 0) {
+                    highlights.forEach(h => {
+                        drawHighlight(wrapper, h, viewport);
+                    });
+                    console.log(`已绘制 ${highlights.length} 个高亮框`);
+                } else {
+                    console.log("第 1 页没有匹配的高亮数据 (可能是模拟坐标和你的 PDF 内容不匹配)");
+                    statusMsg.textContent += " (注：模拟坐标可能与你的实际 PDF 内容位置不符，这是正常的，仅演示逻辑)";
+                }
+
+            } catch (error) {
+                console.error(error);
+                statusMsg.className = 'error';
+                if (error.name === 'MissingPDFException') {
+                    statusMsg.textContent = `❌ 错误：找不到文件 '${PDF_FILE_NAME}'。\n请确保该文件与 html 在同一目录，且文件名完全一致。`;
+                } else {
+                    statusMsg.textContent = `❌ 加载失败：${error.message}`;
+                }
+            }
+        }
+
+        // 核心：坐标转换与绘制
+        function drawHighlight(container, h, viewport) {
+            const div = document.createElement('div');
+            div.className = 'highlight-rect';
+
+            // --- 坐标转换逻辑 (重点) ---
+            // PyMuPDF (后端): 原点 (0,0) 在左下角，Y 轴向上。
+            // CSS (前端): 原点 (0,0) 在左上角，Y 轴向下。
+
+            const pdfHeight = viewport.height / SCALE; // PDF 原始高度
+
+            // 计算 CSS 的 Top 值
+            // 公式：(PDF 总高 - 矩形底部 Y) * 缩放
+            const cssTop = (pdfHeight - h.y1) * SCALE;
+            const cssLeft = h.x0 * SCALE;
+            const cssWidth = (h.x1 - h.x0) * SCALE;
+            const cssHeight = (h.y1 - h.y0) * SCALE;
+
+            div.style.left = `${cssLeft}px`;
+            div.style.top = `${cssTop}px`;
+            div.style.width = `${cssWidth}px`;
+            div.style.height = `${cssHeight}px`;
+
+            container.appendChild(div);
+        }
+
+        // 启动
+        init();
+    </script>
+</body>
+</html>
