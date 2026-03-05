@@ -15,6 +15,7 @@ from typing import List, Dict, Tuple
 from dataclasses import dataclass
 from dotenv import load_dotenv
 import os
+import pickle
 # 加载 .env 文件中的配置
 load_dotenv()
 DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY", "").strip('"')
@@ -40,7 +41,7 @@ MODEL_PATH = os.path.join(PROJECT_ROOT, "modelSet")
 CHROMA_DB_PATH = os.path.join(PROJECT_ROOT, "chroma_db")
 EMBEDDING_MODEL_PATH = os.path.join(MODEL_PATH, "bge-small-zh-v1.5")
 RERANKER_MODEL_PATH = os.path.join(MODEL_PATH, "bge-ranker-base")
-
+BM25_INDEX_PATH = os.path.join(MODEL_PATH, "bm25_index.pkl")
 
 def load_models():
     """加载向量化模型和 reranker 模型"""
@@ -212,17 +213,6 @@ def save_to_chromadb(parents: List[Dict], children: List[Dict], collection_name:
 
     # 初始化 ChromaDB 客户端（使用持久化存储 + 自定义函数）
     client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
-
-    # 获取或创建 collection
-    # try:
-    #     collection = client.get_collection(name=collection_name)
-    #     print(f"使用已存在的集合：{collection_name}")
-    # except:
-    #     collection = client.create_collection(
-    #         name=collection_name,
-    #         metadata={"hnsw:space": "cosine"}
-    #     )
-    #     print(f"创建新集合：{collection_name}")
     try:
         client.delete_collection(name=collection_name)
     except:
@@ -247,7 +237,9 @@ def save_to_chromadb(parents: List[Dict], children: List[Dict], collection_name:
             "title": parent["title"],
             "chapter": parent["metadata"]["chapter"],
             "tags": ",".join(parent["metadata"].get("tags", [])),
-            "page_start": str(parent["metadata"].get("page_start", 0))
+            "page_start": str(parent["metadata"].get("page_start", 0)),
+            "source_file": parent["metadata"].get("source_file", "unknown")  # 新增
+
         })
         # 使用本地模型计算向量
         parent_embeddings.append(get_embedding(parent["content"]))
@@ -258,6 +250,8 @@ def save_to_chromadb(parents: List[Dict], children: List[Dict], collection_name:
     child_metadatas = []
     child_embeddings = []
 
+    # 创建parent_id 到source_file 的映射
+    parent_source_map = {p["id"]: p["metadata"].get("source_file","unknow") for p in parents}
     for child in children:
         child_ids.append(child["id"])
         child_documents.append(child["content"])
@@ -268,7 +262,8 @@ def save_to_chromadb(parents: List[Dict], children: List[Dict], collection_name:
             "article": child["metadata"]["article"],
             "tags": ",".join(child["metadata"].get("tags", [])),
             "page": str(child["metadata"].get("page", 0)),
-            "parent_id": child["parent_id"]
+            "parent_id": child["parent_id"],
+            "source_file":parent_source_map.get(child["parent_id"],"unknow")
         })
         # 使用本地模型计算向量
         child_embeddings.append(get_embedding(child["content"]))
@@ -309,7 +304,8 @@ def save_to_chromadb(parents: List[Dict], children: List[Dict], collection_name:
             'ids': parent_ids + child_ids
         }
         print(f"BM25 索引构建完成，共 {len(tokenized_docs)} 个文档")
-
+    # 保存 BM25 索引到文件
+    save_bm25_index()
     print(f"ChromaDB 中总文档数：{collection.count()}")
     return collection
 
@@ -367,9 +363,13 @@ def query_with_hybrid_search(collection, query_text: str, n_results: int = 5, al
     if reranker_model is None or embedding_model is None:
         load_models()
     # 检查 BM25 索引是否已加载，未加载则返回空结果
-    if bm25_index is None or not document_store:
-        print("⚠️ BM25 索引未初始化，正在执行 save_to_chromadb 函数")
-
+    if not load_bm25_index():
+        print("⚠️ BM25 索引未初始化，请先运行 save_to_chromadb 函数")
+        return {
+            'documents': [[]],
+            'metadatas': [[]],
+            'scores': [[]]
+        }
     # 1. 向量检索
     query_emb = embedding_model.encode(query_text, normalize_embeddings=True)
     vector_results = collection.query(
@@ -445,6 +445,7 @@ def query_with_hybrid_search(collection, query_text: str, n_results: int = 5, al
         print(f"   内容：{detail['document'][:100]}...")
 
 
+
 def get_embedding(text: str) -> List[float]:
     """使用本地 bge 模型获取文本向量"""
     if embedding_model is None:
@@ -500,7 +501,9 @@ def save_to_chromadb_no_bm25(parents: List[Dict], children: List[Dict], collecti
             "title": parent["title"],
             "chapter": parent["metadata"]["chapter"],
             "tags": ",".join(parent["metadata"].get("tags", [])),
-            "page_start": str(parent["metadata"].get("page_start", 0))
+            "page_start": str(parent["metadata"].get("page_start", 0)),
+            "source_file": parent["metadata"].get("source_file", "unknown")  # 新增
+
         })
         # 使用本地模型计算向量
         parent_embeddings.append(get_embedding(parent["content"]))
@@ -521,7 +524,9 @@ def save_to_chromadb_no_bm25(parents: List[Dict], children: List[Dict], collecti
             "article": child["metadata"]["article"],
             "tags": ",".join(child["metadata"].get("tags", [])),
             "page": str(child["metadata"].get("page", 0)),
-            "parent_id": child["parent_id"]
+            "parent_id": child["parent_id"],
+            "source_file": parents[child["parent_id"]]["metadata"].get("source_file", "unknown")  # 新增
+
         })
         # 使用本地模型计算向量
         child_embeddings.append(get_embedding(child["content"]))
@@ -672,7 +677,7 @@ def build_parent_child_index_from_pdf(pdf_path: str,
             "metadata": {
                 **parent.metadata,
                 "chapter": "\n".join(parent.content_lines),  # chapter 也改为完整内容
-                "source_file": os.path.basename(pdf_path),
+                "source_file": os.path.join(PROJECT_ROOT,os.path.basename(pdf_path)),
                 "tags": tags  # ← 新增
 
             },
@@ -690,8 +695,7 @@ def build_parent_child_index_from_pdf(pdf_path: str,
                     # 给前端：一个条款标题可能跨多行/多处，这里返回所有框
                     "coords": [box.to_list() for box in child.coord_boxes],
                     "tags": tags,  # ← 新增
-                    "source_file": os.path.basename(pdf_path)  # 新增：来源文件
-
+                    "source_file": os.path.join(PROJECT_ROOT,os.path.basename(pdf_path)) # 新增：来源文件
                 }
             })
 
@@ -721,11 +725,40 @@ def test_hybrid():
         print(f"   内容：{detail['document'][:100]}...")
 
 
+def load_bm25_index():
+    """加载 BM25 索引（如果存在）"""
+    global bm25_index, document_store
+
+    if os.path.exists(BM25_INDEX_PATH):
+        print(f"正在加载 BM25 索引：{BM25_INDEX_PATH}")
+        with open(BM25_INDEX_PATH, 'rb') as f:
+            data = pickle.load(f)
+            bm25_index = data['bm25_index']
+            document_store = data['document_store']
+        print(f"✓ BM25 索引加载完成，共 {len(document_store['documents'])} 个文档")
+        return True
+    else:
+        print("⚠️ BM25 索引文件不存在，需要先构建")
+        return False
 
 
-# ====================== 简单示例调用 ======================
+def save_bm25_index():
+    """保存 BM25 索引"""
+    global bm25_index, document_store
 
-if __name__ == "__main__":
+    if bm25_index is not None and document_store is not None:
+        print(f"正在保存 BM25 索引到：{BM25_INDEX_PATH}")
+        with open(BM25_INDEX_PATH, 'wb') as f:
+            pickle.dump({
+                'bm25_index': bm25_index,
+                'document_store': document_store
+            }, f)
+        print(f"✓ BM25 索引保存完成")
+    else:
+        print("⚠️ 没有可保存的 BM25 索引")
+
+
+def load_build_index():
     import glob
 
     # 获取 files 目录下所有 PDF 文件
@@ -782,3 +815,28 @@ if __name__ == "__main__":
         print(f"   向量得分：{detail['vector_score']:.4f}")
         print(f"   BM25 得分：{detail['bm25_score']:.4f}")
         print(f"   内容：{detail['document'][:100]}...")
+
+
+def only_query():
+    # 测试查询（带 rerank）
+    print("\n测试查询（使用混合检索）...")
+    query_text = "国家助学金申请条件"
+
+    # 从现有 ChromaDB 获取 collection
+    import chromadb
+
+    client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+    collection = client.get_collection(name="regulations")
+
+    results = query_with_hybrid_search(collection, query_text, n_results=3, alpha=0.7)
+
+    print(f"\n查询：{query_text}")
+    print(f"查询结果:")
+    for i, detail in enumerate(results['details'], 1):
+        print(f"\n[{i}] 综合得分：{detail['hybrid_score']:.4f}")
+        print(f"   向量得分：{detail['vector_score']:.4f}")
+        print(f"   BM25 得分：{detail['bm25_score']:.4f}")
+        print(f"   内容：{detail['document'][:100]}...")
+# ====================== 简单示例调用 ======================
+if __name__ == "__main__":
+    load_build_index()

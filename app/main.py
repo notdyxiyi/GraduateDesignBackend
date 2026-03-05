@@ -5,18 +5,16 @@
 from fastapi import FastAPI, Depends
 from fastapi.security import OAuth2PasswordBearer
 from app.database import engine, Base, get_db
-from app.routers import users
+from app.routers import users,dialogs
 from app import models, auth
 import uvicorn
 
-# # 自动建表
-# Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="My FastAPI Project")
 
 # 注册路由
 app.include_router(users.router)
-
+app.include_router(dialogs.router,prefix = "/dialog")
 # 依赖项：获取当前用户 (供其他受保护接口使用)
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
