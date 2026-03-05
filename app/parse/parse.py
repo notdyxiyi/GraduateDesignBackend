@@ -250,8 +250,9 @@ def save_to_chromadb(parents: List[Dict], children: List[Dict], collection_name:
     child_metadatas = []
     child_embeddings = []
 
-    # 创建parent_id 到source_file 的映射
+    # 创建 parent_id 到 source_file 的映射
     parent_source_map = {p["id"]: p["metadata"].get("source_file","unknow") for p in parents}
+    import json
     for child in children:
         child_ids.append(child["id"])
         child_documents.append(child["content"])
@@ -263,6 +264,7 @@ def save_to_chromadb(parents: List[Dict], children: List[Dict], collection_name:
             "tags": ",".join(child["metadata"].get("tags", [])),
             "page": str(child["metadata"].get("page", 0)),
             "parent_id": child["parent_id"],
+            "coords": json.dumps(child["metadata"].get("coords", [])),  # 转为 JSON 字符串存储
             "source_file":parent_source_map.get(child["parent_id"],"unknow")
         })
         # 使用本地模型计算向量
@@ -288,7 +290,7 @@ def save_to_chromadb(parents: List[Dict], children: List[Dict], collection_name:
     if child_documents:
         collection.add(
             documents=child_documents,
-            metadatas=child_metadatas,
+            metadatas= child_metadatas,
             embeddings=child_embeddings,
             ids=child_ids
         )
@@ -407,42 +409,43 @@ def query_with_hybrid_search(collection, query_text: str, n_results: int = 5, al
 
         # 加权融合
         hybrid_score = alpha * v_score + (1 - alpha) * b_score
+        
+        # 将最终得分加入 metadata
+        meta_with_score = meta.copy()  # 避免修改原始数据
+        meta_with_score['hybrid_score'] = hybrid_score
+        meta_with_score['vector_score'] = v_score
+        meta_with_score['bm25_score'] = b_score
+        # 解析 coords 字符串为列表
+        if 'coords' in meta_with_score and isinstance(meta_with_score['coords'], str):
+            try:
+                meta_with_score['coords'] = json.loads(meta_with_score['coords'])
+            except:
+                meta_with_score['coords'] = []
+        
         hybrid_results[doc] = {
-            'score': hybrid_score,
-            'metadata': meta,
+            'hybrid_score': hybrid_score,
+            'metadata': meta_with_score,
             'vector_score': v_score,
             'bm25_score': b_score
         }
 
     # 5. 排序并返回 top-n
-    sorted_results = sorted(hybrid_results.items(), key=lambda x: x[1]['score'], reverse=True)[:n_results]
+    sorted_results = sorted(hybrid_results.items(), key=lambda x: x[1]['hybrid_score'], reverse=True)[:n_results]
 
     final_results = {
         'documents': [[item[0] for item in sorted_results]],
         'metadatas': [[item[1]['metadata'] for item in sorted_results]],
-        'scores': [[item[1]['score'] for item in sorted_results]],
+        'hybrid_score': [[item[1]['hybrid_score'] for item in sorted_results]],
         'details': [{
             'document': item[0],
             'metadata': item[1]['metadata'],
-            'hybrid_score': item[1]['score'],
+            'hybrid_score': item[1]['hybrid_score'],
             'vector_score': item[1]['vector_score'],
             'bm25_score': item[1]['bm25_score']
         } for item in sorted_results]
     }
 
     return final_results
-    # 测试查询（带 rerank）
-    print("\n测试查询（使用混合检索）...")
-    query_text = "国家助学金申请条件"
-    results = query_with_hybrid_search(collection, query_text, n_results=3, alpha=0.7)
-
-    print(f"\n查询：{query_text}")
-    print(f"查询结果:")
-    for i, detail in enumerate(results['details'][0], 1):
-        print(f"\n[{i}] 综合得分：{detail['hybrid_score']:.4f}")
-        print(f"   向量得分：{detail['vector_score']:.4f}")
-        print(f"   BM25 得分：{detail['bm25_score']:.4f}")
-        print(f"   内容：{detail['document'][:100]}...")
 
 
 
@@ -837,6 +840,7 @@ def only_query():
         print(f"   向量得分：{detail['vector_score']:.4f}")
         print(f"   BM25 得分：{detail['bm25_score']:.4f}")
         print(f"   内容：{detail['document'][:100]}...")
+
 # ====================== 简单示例调用 ======================
 if __name__ == "__main__":
     load_build_index()

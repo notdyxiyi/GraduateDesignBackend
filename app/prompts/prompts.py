@@ -70,5 +70,5 @@ AFTER_RANKER_PROMPT = """
 {context}
 
 # Response
-请根据上述规则和参考信息，直接输出回答：
+请根据上述规则和参考信息，用Markdown格式来回答，必要时刻可以使用 Mermaid 语法来描述：
 """
